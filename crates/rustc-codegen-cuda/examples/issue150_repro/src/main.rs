@@ -28,6 +28,9 @@ use cuda_host::cuda_module;
 mod kernels {
     use cuda_device::{DisjointSlice, gpu_printf, kernel, thread};
 
+    // Kernel shape kept verbatim from issue #150: this exact pattern is
+    // what makes opt's inliner introduce llvm.lifetime.start/end markers.
+    #[allow(clippy::redundant_pattern_matching)]
     #[kernel]
     pub fn misbehave(mut dst: DisjointSlice<i32>) {
         let idx = thread::index_1d();
