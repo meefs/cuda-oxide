@@ -500,16 +500,21 @@ pub(crate) fn convert_extract_array_element(
     Ok(())
 }
 
-/// Spill an enum SSA value into a fresh stack slot so byte-precise
-/// (filler-resident) payload accesses can be made against it. Returns the
-/// slot pointer. The slot is stamped with the enum's rustc ABI alignment:
-/// a filler-heavy struct like `{ i8, [7 x i8] }` has natural alignment 1
-/// while rustc may demand 8.
+/// Copy an enum value into a fresh stack slot and return the pointer.
 ///
-/// The alloca is emitted at the use site, like
-/// [`convert_extract_array_element`]; `opt -O2` (SROA) eliminates it.
-/// Hoisting these to the function entry block is a known follow-up for
-/// the `CUDA_OXIDE_NO_OPT=1` path.
+/// This is how we reach a payload field that has no struct slot of its
+/// own (its bytes are shared with a different-typed field of another
+/// variant): once the value sits in memory, a byte-precise pointer can
+/// read or write any part of it, no struct field needed.
+///
+/// The slot is marked with the enum's real (rustc) alignment. The struct
+/// type alone can look under-aligned: `{ i8, [7 x i8] }` says "align 1"
+/// to LLVM, while Rust may require 8.
+///
+/// The alloca lands at the use site, same as
+/// [`convert_extract_array_element`]; the standard `opt -O2` run (SROA)
+/// removes it again. Hoisting these into the function's entry block is a
+/// known follow-up for the unoptimised (`CUDA_OXIDE_NO_OPT=1`) path.
 fn spill_enum_value(
     ctx: &mut Context,
     rewriter: &mut DialectConversionRewriter,
@@ -539,8 +544,8 @@ fn spill_enum_value(
     slot_ptr
 }
 
-/// Byte-precise pointer `base + offset` into an enum spill slot
-/// (`getelementptr i8, ptr base, offset`).
+/// Pointer to `base + offset` bytes, for reaching a payload field inside
+/// a spilled enum (`getelementptr i8, ptr base, offset`).
 fn enum_byte_gep(
     ctx: &mut Context,
     rewriter: &mut DialectConversionRewriter,
@@ -559,14 +564,17 @@ fn enum_byte_gep(
     gep_op.get_operation().deref(ctx).get_result(0)
 }
 
-/// Convert `mir.construct_enum` to LLVM struct operations.
+/// Convert `mir.construct_enum` (e.g. `E::A(x)`) to LLVM operations.
 ///
-/// The struct shape and every index into it come from
-/// [`build_enum_slot_map`] (never hand-computed): the tag is inserted at
-/// `tag_slot` with the variant's declared discriminant VALUE, payload
-/// fields with typed slots are `insertvalue`d, and filler-resident fields
-/// (bytes that collide with another variant's field of a different type)
-/// are written through a stack spill at their rustc byte offsets.
+/// Builds the enum value slot by slot, taking every index from
+/// [`build_enum_slot_map`] (indexes are never computed by hand here):
+///
+/// 1. Put the variant's declared discriminant VALUE into the tag slot.
+/// 2. `insertvalue` each payload field that owns a struct slot.
+/// 3. If some field has no slot (its bytes are shared with a
+///    different-typed field of another variant), finish through memory:
+///    copy the value to a stack slot, store that field at its byte
+///    position, and load the completed enum back.
 pub(crate) fn convert_construct_enum(
     ctx: &mut Context,
     rewriter: &mut DialectConversionRewriter,
@@ -609,11 +617,10 @@ pub(crate) fn convert_construct_enum(
         }
     };
 
-    // Build the value with the CONVERTED enum type (the same one the type
-    // converter produces for block args, loads, allocas, ...) and the slot
-    // map derived in the same walk, so constructed values and the
-    // converted type cannot diverge. Filler slots are simply never
-    // written.
+    // Build the value as the SAME struct type the type converter
+    // produces everywhere else (block args, loads, allocas, ...). Taking
+    // both the type and the indices from one slot map is what keeps them
+    // in agreement. Filler slots are simply never written.
     let slot_map = build_enum_slot_map(ctx, result_ty).map_err(anyhow_to_pliron)?;
     let llvm_struct_ty = slot_map.llvm_struct_ty;
     let llvm_discriminant_ty = convert_type(ctx, mir_discr_ty).map_err(anyhow_to_pliron)?;
@@ -672,8 +679,8 @@ pub(crate) fn convert_construct_enum(
         .map(|&c| c as usize)
         .sum();
 
-    // SSA-insert every payload field that owns a typed slot; collect the
-    // filler-resident remainder for the memory pass below.
+    // Insert every payload field that owns a struct slot; remember the
+    // slotless ones for the memory pass below.
     let mut deferred: Vec<(usize, Value)> = Vec::new();
     let mut last_op = insert_discr.get_operation();
     for (i, operand) in operands.into_iter().enumerate() {
@@ -709,8 +716,8 @@ pub(crate) fn convert_construct_enum(
         return Ok(());
     }
 
-    // Filler-resident fields: spill the partially-built value, store each
-    // remaining payload at its rustc byte offset, and load the completed
+    // Slotless fields: copy the half-built value to the stack, write
+    // each remaining payload at its byte position, and load the finished
     // enum back as the result.
     let slot_ptr = spill_enum_value(ctx, rewriter, current_struct, llvm_struct_ty, abi_align);
     for (flat, operand) in deferred {
@@ -728,8 +735,12 @@ pub(crate) fn convert_construct_enum(
     Ok(())
 }
 
-/// Look up the pre-conversion `MirEnumType` of a converted enum operand
-/// and build its slot map (plus the rustc ABI alignment, for spill slots).
+/// Get the slot map for an enum operand.
+///
+/// By the time an op is converted, its operand's type has already been
+/// rewritten to the LLVM struct, so we look up the ORIGINAL `MirEnumType`
+/// the framework recorded for it and rebuild the map from that. Also
+/// returns the enum's rustc alignment, which spill slots need.
 fn enum_slot_map_of_operand(
     ctx: &mut Context,
     operands_info: &OperandsInfo,
@@ -752,14 +763,14 @@ fn enum_slot_map_of_operand(
     Ok((map, abi_align))
 }
 
-/// Convert `mir.get_discriminant` to `llvm.extractvalue`.
+/// Convert `mir.get_discriminant` (reading which variant is alive) to
+/// `llvm.extractvalue`.
 ///
-/// Extracts the discriminant (tag) from an enum value at the slot map's
-/// `tag_slot` (the tag is usually the first slot, but rustc may place it
-/// after payload bytes). The tag holds the variant's DECLARED
-/// discriminant value (what `construct_enum` stored), so downstream
-/// `SwitchInt` comparisons match against discriminant values, never
-/// variant indices.
+/// The tag is read from the slot map's `tag_slot`. That is usually slot
+/// 0, but rustc may put the tag after a payload, so the slot is never
+/// assumed. The value read is the variant's DECLARED discriminant (what
+/// `construct_enum` stored), so the `match` that follows compares
+/// declared values, never variant positions.
 pub(crate) fn convert_get_discriminant(
     ctx: &mut Context,
     rewriter: &mut DialectConversionRewriter,
@@ -780,15 +791,18 @@ pub(crate) fn convert_get_discriminant(
     Ok(())
 }
 
-/// Convert `mir.enum_payload` to a payload-field read.
+/// Convert `mir.enum_payload` (reading a variant's field, e.g. the `x`
+/// in `E::A(x) => x`) to a payload-field read.
 ///
-/// Fields owning a typed slot in the [`EnumSlotMap`] are read with
-/// `llvm.extractvalue`. Filler-resident fields (bytes colliding with
-/// another variant's field of a different type) are read through a stack
-/// spill at their rustc byte offset: alloca + store + `gep i8` + typed
-/// load, the same bitcast-free reinterpretation
-/// [`convert_extract_array_element`] uses. Zero-sized fields read as
-/// `undef` of their converted type.
+/// Three cases, decided by the [`EnumSlotMap`]:
+///
+/// - The field owns a struct slot: a plain `llvm.extractvalue`.
+/// - The field has no slot (its bytes are shared with a different-typed
+///   field of another variant): go through memory. Copy the enum to a
+///   stack slot, point at the field's byte position, and load it with
+///   its own type. Same trick as [`convert_extract_array_element`], and
+///   it avoids LLVM `bitcast` entirely.
+/// - The field is zero-sized: there is nothing to read; produce `undef`.
 pub(crate) fn convert_enum_payload(
     ctx: &mut Context,
     rewriter: &mut DialectConversionRewriter,

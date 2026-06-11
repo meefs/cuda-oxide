@@ -542,10 +542,10 @@ pub struct EnumVariant {
     pub name: String,
     /// Field types for this variant (empty for unit variants like None)
     pub field_types: Vec<Ptr<TypeObj>>,
-    /// Byte offset of each field within the enum, from rustc's layout
-    /// (parallel to `field_types`). Variants OVERLAP in Rust's layout, so
-    /// offsets from different variants may coincide. Empty when layout is
-    /// unknown (niched / single-variant models).
+    /// Where each field lives, as a byte position inside the ENUM (not
+    /// inside the variant), from rustc's layout. Same order as
+    /// `field_types`. Different variants reuse the same positions because
+    /// they share bytes. Empty when the layout was not recorded.
     pub field_offsets: Vec<u64>,
 }
 
@@ -587,20 +587,42 @@ impl EnumVariant {
 ///
 /// Represents Rust enums like `Option<T>`, `Result<T,E>`, and custom enums.
 ///
-/// Lowered as a `{tag, variant fields...}` struct:
-/// - Discriminant tag sourced from rustc's layout (width AND signedness of
-///   the tag scalar for Direct-tag enums; a variant-count fallback for the
-///   niched / single-variant models, which are deliberately un-niched).
-///   The tag holds the variant's DECLARED discriminant value, never its
-///   variant index.
-/// - All variants' payload fields concatenated in declaration order (NOT
-///   overlapped like Rust's real layout). mir-lower uses `total_size` to pad
-///   the struct to rustc's size, or to reject such enums loudly at the
-///   kernel ABI boundary when concatenation makes the struct larger than
-///   the Rust object (device-local use stays self-consistent and allowed).
+/// # How Rust lays out an enum, and what this type records
 ///
-/// Note: For simplicity, we store variant info in flattened vectors
-/// since the `#[format_type]` macro has trouble with nested structs.
+/// An enum value in memory is one tag (the "discriminant", saying which
+/// variant is alive) plus that variant's payload. All variants share the
+/// same bytes, because only one of them exists at a time:
+///
+/// ```text
+/// #[repr(u32)] enum E { A(u32), B(f32), C }     8 bytes total
+///
+/// byte:  0         4
+///        [ tag     | A's u32 ]   when the value is A
+///        [ tag     | B's f32 ]   when the value is B   (same bytes!)
+///        [ tag     | unused  ]   when the value is C
+/// ```
+///
+/// This type records that layout straight from rustc: the tag's type and
+/// byte position, every payload field's byte position, and the total
+/// size. The lowering uses these numbers to give the enum exactly the
+/// same bytes on the device as on the host, so enum data can cross the
+/// kernel boundary safely.
+///
+/// Two things are easy to get wrong, so they are spelled out here:
+///
+/// - The tag stores the variant's DECLARED discriminant value, never its
+///   position in the enum. For `enum E { A = 7 }`, the tag holds 7.
+/// - `Option<&T>` and friends are "niche-encoded": Rust hides the tag
+///   inside the payload itself (a `&T` is never null, so null can mean
+///   `None`). We do not model that on the device. Such enums get a
+///   separate synthetic tag instead, and `total_size` stays 0 to mean
+///   "layout not recorded". That model works fine inside a kernel but
+///   its bytes do NOT match the host's, so these enums are rejected at
+///   the kernel boundary.
+///
+/// Note: variant info lives in flattened parallel vectors (the
+/// `#[format_type]` macro has trouble with nested structs). Use
+/// `variant_field_counts` to split the `all_*` vectors per variant.
 ///
 /// # Verification
 /// * Must have at least one variant.
@@ -628,15 +650,14 @@ pub struct MirEnumType {
     pub variant_field_counts: Vec<u32>,
     /// All field types concatenated (use variant_field_counts to split)
     pub all_field_types: Vec<Ptr<TypeObj>>,
-    /// Byte offset of each field within the enum, from rustc's layout
-    /// (parallel to `all_field_types`; split with `variant_field_counts`).
-    /// Variants overlap in Rust's layout, so offsets from different
-    /// variants may coincide. Empty when `total_size == 0` (layout
-    /// unknown: niched / single-variant models).
+    /// Where each field lives, as a byte position inside the enum, from
+    /// rustc's layout (same order as `all_field_types`). Positions repeat
+    /// across variants because variants share bytes. Empty when the
+    /// layout was not recorded (`total_size == 0`).
     pub all_field_offsets: Vec<u64>,
-    /// Byte offset of the discriminant tag within the enum, from rustc's
-    /// layout. Meaningful only when `total_size > 0`; rustc may place the
-    /// tag after payload bytes, so 0 must not be assumed.
+    /// Where the tag lives, as a byte position inside the enum. Usually
+    /// 0, but rustc is free to put the tag after a payload, so never
+    /// assume it. Meaningful only when `total_size > 0`.
     pub tag_offset: u64,
     /// Total enum size in bytes from rustc layout (including padding).
     /// 0 means unknown / not memory-faithful; mir-lower then keeps the
@@ -674,11 +695,12 @@ impl MirEnumType {
         )
     }
 
-    /// Create a new enum type from EnumVariant definitions plus rustc layout
-    /// information (tag byte offset, total size and ABI alignment in bytes;
-    /// size/align 0 = unknown). When `total_size > 0`, every variant must
-    /// carry rustc field offsets (`EnumVariant::new_with_offsets`); the
-    /// verifier enforces this.
+    /// Create a new enum type carrying rustc's layout: where the tag
+    /// lives, how big the whole enum is, and how it must be aligned (all
+    /// in bytes; size/align 0 means "layout not recorded"). When a size
+    /// is given, every variant must also say where its fields live
+    /// (build them with [`EnumVariant::new_with_offsets`]); the verifier
+    /// checks this.
     #[allow(clippy::too_many_arguments)]
     pub fn get_with_layout(
         ctx: &mut Context,
@@ -838,11 +860,11 @@ impl Verify for MirEnumType {
             );
         }
         if self.total_size > 0 {
-            // Memory-faithful (Direct-tag) enums must carry one rustc byte
-            // offset per field, and every offset (incl. the tag's) must lie
-            // inside the object. Field/tag SIZES are not known at this
-            // level; the slot-map construction in mir-lower asserts the
-            // stronger offset + size <= total_size invariant.
+            // A recorded layout must be complete and self-consistent: one
+            // byte position per field, and every position inside the
+            // object. (Whether a field also FITS at its position needs
+            // type sizes, which this crate does not compute; mir-lower's
+            // slot map checks that part.)
             if self.all_field_offsets.len() != self.all_field_types.len() {
                 return verify_err!(
                     Location::Unknown,

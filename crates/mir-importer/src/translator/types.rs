@@ -677,11 +677,11 @@ pub fn translate_type(
                         variant_discriminants.push(discr_val);
                     }
 
-                    // Translate each variant. For memory-faithful (Direct
-                    // tag) enums, also record every field's byte offset
-                    // from rustc's layout, via the same shared helper that
-                    // constant decoding uses; variants OVERLAP in that
-                    // layout, so offsets from different variants coincide.
+                    // Translate each variant. When the layout is recorded
+                    // (total_size > 0), also note where each field lives,
+                    // using the same shared helper constant decoding uses.
+                    // Positions repeat across variants: variants share
+                    // bytes, since only one is alive at a time.
                     let mut enum_variants = Vec::with_capacity(variants.len());
                     for (variant_idx, variant) in variants.iter().enumerate() {
                         let fields = variant.fields();

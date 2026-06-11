@@ -1176,19 +1176,20 @@ mod tests {
             .expect("multi-payload enum kernel param must lower");
     }
 
-    /// Niche-encoded enums (`total_size == 0`, more than one variant) keep
-    /// the deliberately un-niched device model with a synthetic tag, so
-    /// they must still be rejected at the kernel ABI boundary. This pins
-    /// the hole the narrowed guard closes: such an enum used to sail past
-    /// the old size-comparison check.
+    /// `Option<&T>`-style enums store no tag on the host (Rust hides the
+    /// variant inside the payload: null means None), but the device
+    /// models them WITH an explicit tag, so their bytes disagree and
+    /// they must be rejected at the kernel boundary. This pins the hole
+    /// the narrowed guard closes: the old size-comparison guard skipped
+    /// these enums entirely and let them through.
     #[test]
     fn kernel_param_rejects_niched_enum() {
         use pliron::builtin::attributes::StringAttr;
 
         let mut ctx = make_ctx();
-        // Un-niched model of Option<&T>: synthetic u8 tag, pointer payload,
-        // total_size 0 ("layout unknown"), exactly what the importer builds
-        // for TagEncoding::Niche.
+        // The device's model of Option<&T>: an explicit u8 tag plus the
+        // pointer payload, with total_size 0 ("layout not recorded"),
+        // exactly what the importer builds for niche-encoded enums.
         let i32_ty: Ptr<TypeObj> = IntegerType::get(&mut ctx, 32, Signedness::Signless).into();
         let pointee = MirPtrType::get_generic(&mut ctx, i32_ty, false);
         let tag_ty: Ptr<TypeObj> = IntegerType::get(&mut ctx, 8, Signedness::Unsigned).into();
@@ -1230,12 +1231,12 @@ mod tests {
             .expect_err("niched enum kernel param must be rejected");
         let msg = format!("{err}");
         assert!(
-            msg.contains("Option") && msg.contains("ABI boundary"),
-            "error must name the enum and the ABI boundary, got: {msg}"
+            msg.contains("Option") && msg.contains("kernel boundary"),
+            "error must name the enum and the kernel boundary, got: {msg}"
         );
         assert!(
-            msg.contains("niche-optimised"),
-            "error must state the unmodeled-niche gap, got: {msg}"
+            msg.contains("niche"),
+            "error must explain the niche layout mismatch, got: {msg}"
         );
     }
 

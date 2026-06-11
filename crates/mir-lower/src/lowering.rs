@@ -81,16 +81,17 @@ pub fn convert_func(
 
     let func_type = mir_func.get_type(ctx);
 
-    // Kernel parameters cross the host/device ABI boundary: the host lays
-    // them out with rustc's real layout (by value via cuLaunchKernel, or
-    // behind pointers/slices into DeviceBuffer memory). Direct-tag enums
-    // lower byte-identically to rustc's layout and pass freely. The
-    // remaining unmodeled shapes are the deliberately un-niched
-    // `total_size == 0` enums (niche-encoded like `Option<&T>`, degenerate
-    // multi-variant Singles like `Result<T, Infallible>`): their device
-    // model carries a synthetic tag rustc's layout does not have, so host
-    // and device would disagree on every byte. Reject those here, at the
-    // boundary. Device-local use (locals, construct, match) stays allowed.
+    // Kernel parameters are host data: the host writes them (by value at
+    // launch, or into DeviceBuffer memory behind a pointer or slice) and
+    // the kernel reads the same bytes, so both sides must agree on what
+    // every byte means. Most enums are fine; their device layout is
+    // byte-identical to rustc's. The exception is enums whose layout we
+    // do not model: niche-encoded ones like Option<&T>, where the host
+    // stores NO tag at all (it marks None with an impossible payload
+    // value, null, since a real &T is never null) while the device adds
+    // an explicit tag of its own. The two sides would read different
+    // bytes, so reject those here at the boundary. Using such an enum
+    // purely inside a kernel is fine and stays allowed.
     if is_kernel {
         let mir_arg_types = {
             use pliron::builtin::type_interfaces::FunctionTypeInterface;
@@ -104,13 +105,14 @@ pub fn convert_func(
                     .map_err(anyhow_to_pliron)?
             {
                 return pliron::input_err_noloc!(
-                    "kernel `{}` parameter {} carries enum `{}` across the host/device ABI \
-                     boundary, but its niche-optimised (or tagless single-variant) layout is \
-                     not modelled in device memory: the device uses a synthetic tag that does \
-                     not exist in rustc's layout, so host and device would disagree on its \
-                     bytes. Use an enum with an explicit discriminant repr (e.g. #[repr(u32)]) \
-                     at the kernel boundary. Device-local use of `{}` (locals, construct, \
-                     match) is unaffected.",
+                    "kernel `{}` parameter {} contains enum `{}`, whose layout differs \
+                     between host and device: the host encodes the variant inside the \
+                     payload itself (Rust's niche optimisation, e.g. null means None for \
+                     a never-null reference) while the device stores an explicit tag. \
+                     Reading it from a kernel would read the wrong bytes. Give the enum an \
+                     explicit discriminant repr (e.g. #[repr(u32)]) to pass it across the \
+                     kernel boundary; using `{}` only inside kernel code (locals, \
+                     construct, match) works as before.",
                     func_name_str,
                     i,
                     enum_name,
@@ -536,14 +538,12 @@ fn anyhow_to_pliron(e: anyhow::Error) -> pliron::result::Error {
 // Alignment Pre-Pass
 // ============================================================================
 
-/// Returns the over-alignment (bytes) carried by `ty` if it is a
-/// `MirStructType` or a memory-faithful `MirEnumType` with a known rustc
-/// ABI alignment, else `None`.
+/// The real (rustc) alignment of a struct or enum type, when recorded.
 ///
-/// Enums need this because their faithful representation can be
-/// filler-heavy: `{ i8, [7 x i8] }` has natural alignment 1 while rustc
-/// demands 8, so the natural alignment of the converted struct cannot be
-/// trusted for allocas/loads/stores of enum values.
+/// The converted LLVM struct alone can claim too little: an enum that
+/// lowers to `{ i8, [7 x i8] }` looks like "align 1" to LLVM even when
+/// Rust requires align 8. Memory ops touching such values get stamped
+/// with the recorded alignment instead.
 fn aggregate_over_align(ctx: &Context, ty: Ptr<TypeObj>) -> Option<u64> {
     let ty_ref = ty.deref(ctx);
     if let Some(s) = ty_ref.downcast_ref::<MirStructType>() {
