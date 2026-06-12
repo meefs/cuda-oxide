@@ -7,8 +7,8 @@
 #![no_std]
 
 pub use cuda_macros::{
-    cluster_launch, constant, convergent, cuda_module, device, gpu_printf, kernel, launch_bounds,
-    pure, readonly,
+    cluster_launch, constant, convergent, cooperative_launch, cuda_module, device, gpu_printf,
+    kernel, launch_bounds, pure, readonly,
 };
 
 // Re-export for convenience
@@ -17,6 +17,7 @@ pub mod barrier;
 pub mod clc;
 pub mod cluster;
 pub mod constant;
+pub mod convert;
 pub mod cooperative_groups;
 pub mod cusimd;
 pub mod debug;
