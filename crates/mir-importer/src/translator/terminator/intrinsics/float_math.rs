@@ -380,9 +380,15 @@ pub fn emit_sincos(
     )?;
 
     let (sin_callee, cos_callee) = if is_f64 {
-        (rust_intrinsics::CALLEE_SIN_F64, rust_intrinsics::CALLEE_COS_F64)
+        (
+            rust_intrinsics::CALLEE_SIN_F64,
+            rust_intrinsics::CALLEE_COS_F64,
+        )
     } else {
-        (rust_intrinsics::CALLEE_SIN_F32, rust_intrinsics::CALLEE_COS_F32)
+        (
+            rust_intrinsics::CALLEE_SIN_F32,
+            rust_intrinsics::CALLEE_COS_F32,
+        )
     };
 
     let callee_id = pliron::identifier::Identifier::try_from("callee").unwrap();
@@ -445,11 +451,19 @@ pub fn emit_sincos(
         .unwrap_or(tuple_op);
 
     if let Some(target_idx) = target {
-        Ok(helpers::emit_goto(ctx, *target_idx, goto_prev, block_map, loc))
+        Ok(helpers::emit_goto(
+            ctx,
+            *target_idx,
+            goto_prev,
+            block_map,
+            loc,
+        ))
     } else {
         input_err!(
             loc.clone(),
-            TranslationErr::unsupported("libm::sincos call without target not supported".to_string())
+            TranslationErr::unsupported(
+                "libm::sincos call without target not supported".to_string()
+            )
         )
     }
 }
