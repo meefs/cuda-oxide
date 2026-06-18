@@ -3362,20 +3362,18 @@ fn try_dispatch_intrinsic(
         path if path.starts_with("cuda_device::DisjointSlice::") => {
             if let Some(method) = path.rsplit("::").next() {
                 match method {
-                    "get_thread_local" => {
-                        Ok(Some(intrinsics::indexing::emit_get_thread_local(
-                            ctx,
-                            body,
-                            args,
-                            destination,
-                            target,
-                            block_ptr,
-                            prev_op,
-                            value_map,
-                            block_map,
-                            loc,
-                        )?))
-                    }
+                    "get_thread_local" => Ok(Some(intrinsics::indexing::emit_get_thread_local(
+                        ctx,
+                        body,
+                        args,
+                        destination,
+                        target,
+                        block_ptr,
+                        prev_op,
+                        value_map,
+                        block_map,
+                        loc,
+                    )?)),
                     "len" => Ok(Some(intrinsics::indexing::emit_len(
                         ctx,
                         body,
