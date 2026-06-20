@@ -231,6 +231,8 @@ fn main() {
                 features.as_deref(),
                 no_fmad,
             );
+            println!();
+            println!("✓ Build succeeded");
         }
         Commands::EmitLtoir {
             example,

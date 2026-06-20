@@ -335,9 +335,6 @@ fn codegen_build_interop(
     // only an explicit `--arch` pins the target here.
     build_interop_device_crates(ctx, example_dir, interop, verbose, arch, None);
     run_host_cargo(example, example_dir, "build", features, None, verbose);
-
-    println!();
-    println!("✓ Build succeeded");
 }
 
 fn reject_interop_nvvm_ir(emit_nvvm_ir: bool) {
@@ -581,9 +578,6 @@ pub fn codegen_build(
         eprintln!("\nBuild failed with exit code: {:?}", status.code());
         std::process::exit(status.code().unwrap_or(1));
     }
-
-    println!();
-    println!("✓ Build succeeded");
 }
 
 // =============================================================================
@@ -623,7 +617,9 @@ pub fn emit_ltoir(
 
     // Step 1: build in NVVM IR mode so the backend writes `<crate>.ll` as
     // libNVVM-ready NVVM IR. codegen_build exits on build failure. FMA
-    // contraction stays at its default (on) for the LTOIR build.
+    // contraction stays at its default (on) for the LTOIR build. Pass
+    // quiet=true so the intermediate "✓ Build succeeded" line is suppressed;
+    // emit_ltoir prints its own unified summary at the end.
     codegen_build(ctx, example, verbose, true, Some(arch), features, false);
 
     // Step 2: compile that NVVM IR to LTOIR via libNVVM -gen-lto.
@@ -712,6 +708,29 @@ fn compile_nvvm_to_ltoir(ir: &[u8], name: &str, compute_arch: &str) -> Vec<u8> {
         eprintln!("Error: nvvmCreateProgram failed: {e}");
         std::process::exit(1);
     });
+
+    // Add libdevice before the kernel module so any __nv_* math calls (exp,
+    // sin, cos, etc.) are resolved at LTOIR compile time, matching the pattern
+    // used by NVCC and cuda-host's own LTOIR path.
+    let libdevice_path = libnvvm_sys::find_libdevice().unwrap_or_else(|e| {
+        eprintln!("Error: could not locate libdevice.10.bc: {e}");
+        eprintln!("Set CUDA_OXIDE_LIBDEVICE, CUDA_TOOLKIT_PATH, or CUDA_HOME.");
+        std::process::exit(1);
+    });
+    let libdevice_bytes = std::fs::read(&libdevice_path).unwrap_or_else(|e| {
+        eprintln!(
+            "Error: could not read libdevice at {}: {e}",
+            libdevice_path.display()
+        );
+        std::process::exit(1);
+    });
+    program
+        .add_module(&libdevice_bytes, "libdevice.10.bc")
+        .unwrap_or_else(|e| {
+            eprintln!("Error: libNVVM rejected libdevice module: {e}");
+            std::process::exit(1);
+        });
+
     program.add_module(ir, name).unwrap_or_else(|e| {
         eprintln!("Error: libNVVM rejected the NVVM IR module: {e}");
         std::process::exit(1);

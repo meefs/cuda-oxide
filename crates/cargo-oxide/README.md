@@ -37,19 +37,21 @@ cargo oxide setup                   # explicitly build the codegen backend
 
 ### Flags
 
-| Flag              | Applies to             | Description                                     |
-|-------------------|------------------------|-------------------------------------------------|
-| `--emit-nvvm-ir`  | run, build, pipeline   | Generate NVVM IR for libNVVM                    |
-| `--arch <sm_XX>`  | run, build, pipeline   | Target architecture override                    |
-| `--arch <sm_XX>`  | emit-ltoir             | Target architecture (required)                  |
-| `--features <F>`  | run, build, emit-ltoir | Comma-separated cargo features to enable        |
-| `-o, --output <P>`| emit-ltoir             | Output path for the `.ltoir` artifact           |
-| `-v, --verbose`   | run, build, emit-ltoir | Show detailed compilation output                |
-| `--no-fmad`       | run, build, pipeline   | Disable FMA contraction (keep separate mul+add) |
-| `--async`         | new                    | Use the async template                          |
-| `--cgdb`          | debug                  | Use cgdb instead of cuda-gdb                    |
-| `--tui`           | debug                  | Use GDB's TUI interface                         |
-| `--check`         | fmt                    | Check formatting only                           |
+| Flag               | Applies to                       | Description                                     |
+|--------------------|----------------------------------|-------------------------------------------------|
+| `--emit-nvvm-ir`   | run, build, pipeline             | Generate NVVM IR for libNVVM                    |
+| `--arch <sm_XX>`   | run, build, pipeline, emit-ltoir | Target arch override                            |
+| `--features <F>`   | run, build, emit-ltoir           | Comma-separated cargo features to enable        |
+| `-o, --output <P>` | emit-ltoir                       | Output path for the `.ltoir` artifact           |
+| `-v, --verbose`    | run, build, emit-ltoir           | Show detailed compilation output                |
+| `--no-fmad`        | run, build, pipeline             | Disable FMA contraction (keep separate mul+add) |
+| `--async`          | new                              | Use the async template                          |
+| `--cgdb`           | debug                            | Use cgdb instead of cuda-gdb                    |
+| `--tui`            | debug                            | Use GDB's TUI interface                         |
+| `--check`          | fmt                              | Check formatting only                           |
+
+`--arch` is required for `emit-ltoir` (LTOIR is architecture-specific); for all other
+commands it is optional and defaults to host GPU auto-detection.
 
 `--no-fmad` disables FMA contraction for kernels that rely on two separate
 roundings (e.g. Dekker's algorithm, 2Sum). Equivalent to `CUDA_OXIDE_NO_FMA=1`.
