@@ -11,12 +11,12 @@
 //! # Pipeline Steps
 //!
 //! ```text
-//! ┌────────────┐  ┌────────────┐  ┌───────────┐  ┌────────────────┐  ┌────────────┐
-//! │ 1. Trans-  │─▶│ 2. Verify  │─▶│ 3. mem2reg│─▶│  4. Lower      │─▶│ 5. Export  │
-//! │    late to │  │ dialect-mir│  │   (slots  │  │ dialect-mir →  │  │ LLVM IR    │
-//! │ dialect-mir│  │            │  │    → SSA) │  │  LLVM dialect  │  │ → PTX (llc)│
-//! └────────────┘  └────────────┘  └───────────┘  └────────────────┘  └────────────┘
+//! MIR -> dialect-mir -> verify -> mem2reg -> annotated loop unroll
+//!     -> LLVM dialect -> LLVM IR -> PTX
 //! ```
+//!
+//! Builds with variable debug information skip `mem2reg` and loop unrolling so
+//! source variables remain in stable stack slots.
 //!
 //! # GPU Target Selection
 //!
@@ -214,11 +214,13 @@ impl Default for PipelineConfig {
 /// 1. Register the `dialect-mir`, `dialect-nvvm`, and LLVM dialects
 /// 2. Translate each function's MIR body into `dialect-mir`
 /// 3. Verify the `dialect-mir` module
-/// 4. Run `pliron::opts::mem2reg` to promote slot allocas back into SSA
-/// 5. Lower `dialect-mir` → LLVM dialect (via `mir-lower`)
-/// 6. Verify the LLVM dialect module
-/// 7. Export the LLVM dialect to a `.ll` file (including device extern declarations)
-/// 8. Invoke `llc` to generate PTX (or emit LTOIR/NVVM IR when requested)
+/// 4. Unless full variable-debug mode is enabled, run `mem2reg` to promote slot
+///    allocas back into SSA
+/// 5. In the same modes, unroll annotated loops and clean up changed functions
+/// 6. Lower `dialect-mir` → LLVM dialect (via `mir-lower`)
+/// 7. Verify the LLVM dialect module
+/// 8. Export the LLVM dialect to a `.ll` file (including device extern declarations)
+/// 9. Invoke `llc` to generate PTX (or emit LTOIR/NVVM IR when requested)
 ///
 /// # Target Selection
 ///
@@ -363,6 +365,25 @@ pub fn run_pipeline(
             eprintln!("{}", module_op_ptr.deref(&ctx).disp(&ctx));
         }
         verify_operation(&ctx, module_op_ptr, "module post-mem2reg")?;
+
+        // Step 4.6: annotation-driven loop unrolling (#[unroll] / #[unroll(N)]).
+        // Runs on the SSA form mem2reg just produced; a no-op unless a loop
+        // contains a `mir.unroll_hint` operation. The pass receives mem2reg's
+        // AnalysisManager for the standard pass shape, but recomputes dominance
+        // after each CFG rewrite.
+        if config.verbose {
+            eprintln!("\n=== Running loop-unroll ===");
+        }
+        mir_transforms::unroll::unroll_annotated_loops(module_op_ptr, &mut ctx, &mut analyses)
+            .map_err(|e| PipelineError::Verification {
+                name: "loop-unroll".to_string(),
+                message: e.disp(&ctx).to_string(),
+                operation: None,
+            })?;
+        verify_operation(&ctx, module_op_ptr, "module post-unroll")?;
+        // Constant folding (sccp -> simplify_cfg -> dce) runs inside the unroll
+        // pass, scoped to functions it actually unrolled; see
+        // `mir_transforms::unroll`. Non-unrolled kernels are left for `opt`/NVVM.
     }
 
     // Step 5: Lower dialect-mir → LLVM dialect.
@@ -1624,8 +1645,8 @@ mod tests {
         let module_block = BasicBlock::new(&mut ctx, None, vec![]);
         module_block.insert_at_back(module_region, &ctx);
 
-        let i32_ty = IntegerType::get(&mut ctx, 32, Signedness::Signless);
-        let callee_ty = LlvmFuncType::get(&mut ctx, i32_ty.into(), vec![], false);
+        let i32_ty = IntegerType::get(&ctx, 32, Signedness::Signless);
+        let callee_ty = LlvmFuncType::get(&ctx, i32_ty.into(), vec![], false);
         let callee_ident: pliron::identifier::Identifier = "__nv_sqrtf".try_into().unwrap();
         let nv_call = LlvmCallOp::new(
             &mut ctx,

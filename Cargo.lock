@@ -732,6 +732,7 @@ dependencies = [
  "linkme",
  "llvm-export",
  "mir-lower",
+ "mir-transforms",
  "once_cell",
  "pliron",
  "pliron-derive",
@@ -751,6 +752,16 @@ dependencies = [
  "pliron",
  "pliron-derive",
  "reserved-oxide-symbols",
+ "rustc-hash",
+ "thiserror",
+]
+
+[[package]]
+name = "mir-transforms"
+version = "0.2.1"
+dependencies = [
+ "dialect-mir",
+ "pliron",
  "rustc-hash",
  "thiserror",
 ]
@@ -819,7 +830,7 @@ checksum = "a89322df9ebe1c1578d689c92318e070967d1042b512afbe49518723f4e6d5cd"
 [[package]]
 name = "pliron"
 version = "0.16.0"
-source = "git+https://github.com/pliron-org/pliron?rev=847561916b34649ba944d4eb7db50d02cf9ddf30#847561916b34649ba944d4eb7db50d02cf9ddf30"
+source = "git+https://github.com/pliron-org/pliron?rev=222dd962a124cba8ec5f119ae6e0ecf202630854#222dd962a124cba8ec5f119ae6e0ecf202630854"
 dependencies = [
  "awint",
  "combine",
@@ -843,7 +854,7 @@ dependencies = [
 [[package]]
 name = "pliron-derive"
 version = "0.16.0"
-source = "git+https://github.com/pliron-org/pliron?rev=847561916b34649ba944d4eb7db50d02cf9ddf30#847561916b34649ba944d4eb7db50d02cf9ddf30"
+source = "git+https://github.com/pliron-org/pliron?rev=222dd962a124cba8ec5f119ae6e0ecf202630854#222dd962a124cba8ec5f119ae6e0ecf202630854"
 dependencies = [
  "combine",
  "convert_case",
@@ -856,7 +867,7 @@ dependencies = [
 [[package]]
 name = "pliron-llvm"
 version = "0.16.0"
-source = "git+https://github.com/pliron-org/pliron?rev=847561916b34649ba944d4eb7db50d02cf9ddf30#847561916b34649ba944d4eb7db50d02cf9ddf30"
+source = "git+https://github.com/pliron-org/pliron?rev=222dd962a124cba8ec5f119ae6e0ecf202630854#222dd962a124cba8ec5f119ae6e0ecf202630854"
 dependencies = [
  "bitflags",
  "log",

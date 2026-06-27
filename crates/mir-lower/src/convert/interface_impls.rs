@@ -9,6 +9,7 @@
 //! bypassing the old category sub-enum dispatch.
 
 use pliron::{
+    builtin::ops::ConstantOp,
     context::Context,
     derive::op_interface_impl,
     irbuild::{
@@ -32,7 +33,7 @@ use dialect_mir::ops::{
     MirGetDiscriminantOp, MirGotoOp, MirGtOp, MirInsertFieldOp, MirLeOp, MirLoadOp, MirLtOp,
     MirMemcpyOp, MirMulOp, MirNeOp, MirNegOp, MirNotOp, MirPtrOffsetOp, MirRefOp, MirRemOp,
     MirReturnOp, MirShlOp, MirShrOp, MirStorageDeadOp, MirStorageLiveOp, MirStoreOp, MirSubOp,
-    MirUndefOp, MirUnreachableOp,
+    MirUndefOp, MirUnreachableOp, MirUnrollHintOp,
 };
 use dialect_nvvm::ops::{
     ActiveMaskOp, BarWarpSyncOp, Barrier0Op, BreakpointOp, ClcQueryGetFirstCtaidXOp,
@@ -511,6 +512,23 @@ impl MirToLlvmConversion for MirConstantOp {
     }
 }
 
+/// A `builtin.constant` that `sccp` materialised carries a signed/unsigned MIR
+/// integer type; normalise it to a signless constant, exactly like `mir.constant`.
+/// Only a non-signless `builtin.constant` reaches here (see `can_convert_op`), so
+/// the emitted signless constant is final and the conversion converges.
+#[op_interface_impl]
+impl MirToLlvmConversion for ConstantOp {
+    fn convert(
+        &self,
+        ctx: &mut Context,
+        rewriter: &mut DialectConversionRewriter,
+        _operands_info: &OperandsInfo,
+    ) -> Result<()> {
+        let value = self.get_value(ctx);
+        super::ops::constants::convert_builtin_constant(ctx, rewriter, self.get_operation(), value)
+    }
+}
+
 #[op_interface_impl]
 impl MirToLlvmConversion for MirFloatConstantOp {
     fn convert(
@@ -858,6 +876,23 @@ impl MirToLlvmConversion for MirStorageLiveOp {
 
 #[op_interface_impl]
 impl MirToLlvmConversion for MirStorageDeadOp {
+    fn convert(
+        &self,
+        ctx: &mut Context,
+        rewriter: &mut DialectConversionRewriter,
+        _operands_info: &OperandsInfo,
+    ) -> Result<()> {
+        rewriter.erase_operation(ctx, self.get_operation());
+        Ok(())
+    }
+}
+
+// Safety net: the loop-unroll pass consumes every `mir.unroll_hint` before
+// lowering, so one should never reach here. But if unrolling is skipped (e.g.
+// a debug build that bypasses the pass), drop the hint rather than fail the
+// conversion: it carries no runtime semantics, only a request to unroll.
+#[op_interface_impl]
+impl MirToLlvmConversion for MirUnrollHintOp {
     fn convert(
         &self,
         ctx: &mut Context,
