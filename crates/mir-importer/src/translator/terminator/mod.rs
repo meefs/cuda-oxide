@@ -1116,8 +1116,7 @@ fn translate_call(
     // ordinary type it compiles to nothing. We decide which case applies
     // from the monomorphized type's layout: uninhabited types are exactly
     // those whose layout has `VariantsShape::Empty`. Inhabited types lower
-    // to a unit no-op; uninhabited ones lower to `unreachable`, matching
-    // how device code models panics (they cannot execute on the GPU).
+    // to a unit no-op; uninhabited ones lower to a trap.
     // If the generic argument or its layout cannot be read, fall through
     // to the loud "not yet supported" rejection below.
     if let Some(ref name) = pattern_name
@@ -1134,21 +1133,7 @@ fn translate_call(
             rustc_public::abi::VariantsShape::Empty
         );
         if uninhabited {
-            let op = Operation::new(
-                ctx,
-                dialect_mir::ops::MirUnreachableOp::get_concrete_op_info(),
-                vec![],
-                vec![],
-                vec![],
-                0,
-            );
-            op.deref_mut(ctx).set_loc(loc);
-            if let Some(prev) = prev_op {
-                op.insert_after(ctx, prev);
-            } else {
-                op.insert_at_front(block_ptr, ctx);
-            }
-            return Ok(op);
+            return Ok(emit_trap_unreachable_after(ctx, block_ptr, prev_op, loc));
         }
         return helpers::emit_unit_noop_intrinsic(
             ctx,
@@ -1186,11 +1171,19 @@ fn translate_call(
 
     // Handle diverging calls (calls that never return, like unwrap_failed, panic, etc.)
     // These have no target block because the function never returns.
-    // In GPU code, we emit an unreachable terminator since panics can't actually execute.
+    //
+    // The callee is dropped and replaced by an immediate trap. That applies
+    // to every `-> !` callee reaching this point, including a user
+    // `#[device]` fn that legitimately diverges (e.g. `loop {}`); full Rust
+    // fidelity would emit the call for resolvable callees the way
+    // `translate_function_item_call` does. Dropping the call is a
+    // pre-existing semantic: the trap only makes it safe, where the bare
+    // `unreachable` previously emitted here was UB that let `opt` delete
+    // the whole panic path.
     if target_usize.is_none() {
-        // This is a diverging call (returns !) - emit unreachable
+        // This is a diverging call (returns !) - emit trap + unreachable
         // Examples: unwrap_failed(), panic!(), abort()
-        return Ok(emit_unreachable_after(ctx, block_ptr, prev_op, loc));
+        return Ok(emit_trap_unreachable_after(ctx, block_ptr, prev_op, loc));
     }
 
     // A call to a rustc intrinsic that no dispatch arm above recognized can
@@ -1639,6 +1632,14 @@ fn translate_closure_call(
     }
 }
 
+/// Terminates the block with a bare `mir.unreachable`.
+///
+/// Only for paths that can never execute: rustc-proven unreachability
+/// (`TerminatorKind::Unreachable`) or code after a call that is emitted into
+/// the module and genuinely never returns.
+///
+/// Runtime-reachable panic paths whose diverging call is dropped must use
+/// [`emit_trap_unreachable_after`] instead.
 fn emit_unreachable_after(
     ctx: &mut Context,
     block_ptr: Ptr<BasicBlock>,
@@ -1660,6 +1661,31 @@ fn emit_unreachable_after(
         op.insert_at_front(block_ptr, ctx);
     }
     op
+}
+
+/// Terminates the block with `nvvm.trap` followed by `mir.unreachable`.
+///
+/// For runtime-reachable diverging paths whose call is not emitted (dropped
+/// panic calls). A thread reaching it aborts the kernel (`trap;` in PTX).
+fn emit_trap_unreachable_after(
+    ctx: &mut Context,
+    block_ptr: Ptr<BasicBlock>,
+    prev_op: Option<Ptr<Operation>>,
+    loc: Location,
+) -> Ptr<Operation> {
+    let trap_op = dialect_nvvm::ops::TrapOp::build(ctx);
+    trap_op.deref_mut(ctx).set_loc(loc.clone());
+    // `nvvm.trap` is a generated intrinsic; the target-requirements
+    // verifier rejects it without its exact ABI marker (`i0295` is
+    // trap's append-only id in intrinsics/abi-v1.toml, the same marker
+    // the generated `debug::trap` dispatch attaches).
+    helpers::set_generated_intrinsic_marker(ctx, trap_op, "v1:i0295");
+    if let Some(prev) = prev_op {
+        trap_op.insert_after(ctx, prev);
+    } else {
+        trap_op.insert_at_front(block_ptr, ctx);
+    }
+    emit_unreachable_after(ctx, block_ptr, Some(trap_op), loc)
 }
 
 /// True only when the rust-call receiver is itself a closure.
